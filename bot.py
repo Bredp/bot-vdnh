@@ -25,179 +25,143 @@ dp = Dispatcher()
 GROUP_ID = -1002080353046  # ID вашей закрытой группы
 TOPIC_ID = 34445           # ID топика в группе
 
-# Состояние отправки вакансий
-is_live = False
-last_sent_vacancy_id = None
+# Client ID и Client Secret для API HH (не используются в текущем коде)
+HH_CLIENT_ID = "NJK9I7I86SHNDQGU0EFC48C3J29U453TOS91F7NSQPHCHBAEIFDAHNOBBQ03NH0M"
+HH_CLIENT_SECRET = "T078KE2BT3H2AO95EI04IAU5KAD67ULEN8BUUDO00CU8724V2R9O2K7KUO2LP820"
 
-def get_max_salary_vacancy():
-    """Получаем вакансию с максимальной зарплатой через API HeadHunter"""
+def get_top_vacancies(count=10):
+    """Получаем топ вакансий через API HeadHunter"""
     url = 'https://api.hh.ru/vacancies'
-
-    # Вычисляем дату "вчера" (для поиска вакансий за последний день)
     yesterday = datetime.now() - timedelta(days=1)
     date_from = yesterday.strftime('%Y-%m-%d')
     params = {
-        'text': 'экскурсовод',  # Ищем только экскурсоводов
-        'area': 1,             # Москва (ID региона)
-        'per_page': 10,        # Количество вакансий на странице
-        'page': 0,             # Номер страницы
-        'date_from': date_from # Фильтр по дате публикации
+        'text': 'экскурсовод OR гид OR "экскурсовод гид"',  # Добавляем ключевые слова
+        'area': 1,          # Москва (ID региона)
+        'per_page': 100,    # Количество вакансий на странице
+        'page': 0,          # Номер страницы
+        'date_from': date_from  # Фильтр по дате публикации
     }
     try:
-        logger.info("Отправляем запрос к API HeadHunter...")
         response = requests.get(url, params=params)
         data = response.json()
         if 'items' not in data or not data['items']:
-            logger.warning("Нет вакансий в ответе API.")
-            return None, None
-        max_salary = None
-        best_vacancy = None
-        best_vacancy_id = None
+            return []
+        
+        vacancies_with_salary = []  # Вакансии с указанной зарплатой
+        vacancies_without_salary = []  # Вакансии без указанной зарплаты
+        
+        required_keywords = {"экскурсовод", "гид", "экскурсовод гид"}  # Требуемые ключевые слова
+        
         for item in data['items']:
-            title = item['name'].strip()
+            title = item['name'].strip().lower()  # Приводим название к нижнему регистру для проверки
             link = item['alternate_url']
             company = item['employer']['name'] if item['employer'] else 'Не указано'
             salary = item['salary']
             vacancy_id = item['id']
-            # Проверяем, что вакансия действительно для Москвы
             area = item.get('area', {}).get('name', '').lower()
+            schedule = item.get('schedule', {}).get('name', '').lower()
+            
+            # Проверяем, что вакансия действительно для Москвы
             if 'москва' not in area:
-                logger.info(f"Вакансия {title} не для Москвы. Пропускаем.")
                 continue
             # Исключаем вакансии с удалённым форматом работы
-            schedule = item.get('schedule', {}).get('name', '').lower()
             if 'удалённо' in schedule or 'remote' in schedule:
-                logger.info(f"Вакансия {title} с удалённым форматом работы. Пропускаем.")
                 continue
-            # Проверяем, что в названии вакансии только одно слово "экскурсовод"
-            if title.lower() != 'экскурсовод':
-                logger.info(f"Вакансия {title} не содержит ТОЛЬКО слово 'экскурсовод'. Пропускаем.")
+            # Проверяем, что название вакансии содержит одно из требуемых слов
+            if not any(keyword in title for keyword in required_keywords):
                 continue
+            
+            # Обработка зарплаты
             salary_value = 0
             salary_text = "Зарплата не указана"
             if salary:
-                salary_value = salary.get('to', 0) or salary.get('from', 0)
-                salary_text = f"{salary.get('from', '')} - {salary.get('to', '')} {salary.get('currency', '')}"
-            if salary_value > (max_salary or 0):
-                max_salary = salary_value
-                best_vacancy = f"💼 {title}\n🏢 {company}\n💰 {salary_text}\n🔗 {link}\n"
-                best_vacancy_id = vacancy_id
-        return best_vacancy, best_vacancy_id
+                currency = salary.get('currency', '').upper()
+                if currency == 'RUR' or currency == 'RUB':  # Заменяем RUR/RUB на символ рубля
+                    currency = '₽'
+                from_value = salary.get('from', None)
+                to_value = salary.get('to', None)
+                if from_value and to_value:
+                    salary_text = f"{from_value} - {to_value} {currency}"
+                    salary_value = to_value
+                elif from_value:
+                    salary_text = f"От {from_value} {currency}"
+                    salary_value = from_value
+                elif to_value:
+                    salary_text = f"До {to_value} {currency}"
+                    salary_value = to_value
+            
+            # Создаем словарь для вакансии
+            vac = {
+                'id': vacancy_id,
+                'title': item['name'],  # Сохраняем оригинальное название
+                'company': company,
+                'salary': salary_text,
+                'link': link,
+                'salary_value': salary_value
+            }
+            
+            if salary_value > 0:  # Если есть зарплата, добавляем в список с зарплатой
+                vacancies_with_salary.append(vac)
+            else:  # Иначе добавляем в список без зарплаты
+                vacancies_without_salary.append(vac)
+        
+        # Сортируем вакансии с зарплатой по убыванию
+        vacancies_with_salary.sort(key=lambda x: x['salary_value'], reverse=True)
+        
+        # Объединяем списки: сначала с зарплатой, затем без зарплаты
+        all_vacancies = vacancies_with_salary + vacancies_without_salary
+        
+        # Возвращаем первые count вакансий
+        return all_vacancies[:count]
+    
     except Exception as e:
         logger.error(f"Ошибка при получении данных через API: {e}")
-        return None, None
-
-async def send_daily_vacancy():
-    """Отправляет вакансию в группу раз в сутки"""
-    global last_sent_vacancy_id
-    if not is_live:
-        logger.info("Автоматическая отправка вакансий отключена.")
-        return
-    logger.info("Получаем вакансию для отправки в группу...")
-    vacancy, vacancy_id = get_max_salary_vacancy()
-    if not vacancy:
-        logger.info("Нет подходящих вакансий для отправки.")
-        return
-    if vacancy_id == last_sent_vacancy_id:
-        logger.info("Эта вакансия уже была отправлена ранее. Пропускаем.")
-        return
-    try:
-        await bot.send_message(
-            chat_id=GROUP_ID,
-            message_thread_id=TOPIC_ID,
-            text=vacancy
-        )
-        logger.info(f"Вакансия отправлена в группу: {vacancy}")
-        last_sent_vacancy_id = vacancy_id
-    except Exception as e:
-        logger.error(f"Ошибка при отправке вакансии в группу: {e}")
-
-@dp.message(Command("start"))
-async def start(message: Message):
-    """Обработка команды /start"""
-    logger.info("Команда /start получена")
-    await message.answer("Привет! Я помогу найти вакансию с максимальной зарплатой для экскурсоводов в Москве.")
+        return []
 
 @dp.message(Command("okmne"))
-async def send_best_vacancy(message: Message):
+async def send_top_vacancies(message: Message):
     """Обработка команды /okmne"""
     logger.info("Команда /okmne получена")
-    await message.answer("Ищу вакансию с максимальной зарплатой за последний день...")
-    vacancy, _ = get_max_salary_vacancy()
-    if vacancy:
-        await message.answer(vacancy)
-    else:
+    await message.answer("Ищу топ-10 вакансий за последний день...")
+    vacancies = get_top_vacancies(10)  # Получаем 10 вакансий
+    if not vacancies:
         await message.answer("Нет подходящих вакансий.")
+        return
+    response = ""
+    for idx, vac in enumerate(vacancies, start=1):
+        response += f"{idx}. 💼 {vac['title']}\n🏢 {vac['company']}\n💰 {vac['salary']}\n🔗 {vac['link']}\n\n"
+    await message.answer(response)
 
-@dp.message(Command("live"))
-async def enable_live(message: Message):
-    """Обработка команды /live"""
-    global is_live
-    is_live = True
-    logger.info("Автоматическая отправка вакансий включена.")
-    await message.answer("Бот теперь будет отправлять вакансии в группу раз в сутки в 10:00.")
-    # Отправляем текущую вакансию в группу
-    vacancy, _ = get_max_salary_vacancy()
-    if vacancy:
+@dp.message(Command("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"))
+async def send_specific_vacancy(message: Message):
+    """Обработка команды /1, /2, ..., /10"""
+    cmd = message.text[1:]
+    idx = int(cmd)
+    logger.info(f"Команда /{cmd} получена")
+    vacancies = get_top_vacancies(10)  # Получаем 10 вакансий
+    if not vacancies:
+        await message.answer("Нет подходящих вакансий.")
+        return
+    if 1 <= idx <= len(vacancies):
+        vac = vacancies[idx - 1]
+        vacancy_text = f"💼 {vac['title']}\n🏢 {vac['company']}\n💰 {vac['salary']}\n🔗 {vac['link']}"
         try:
             await bot.send_message(
                 chat_id=GROUP_ID,
                 message_thread_id=TOPIC_ID,
-                text=vacancy
+                text=vacancy_text
             )
-            await message.answer("Текущая вакансия отправлена в группу.")
+            await message.answer(f"Вакансия №{idx} успешно отправлена в группу!")
         except Exception as e:
             logger.error(f"Ошибка при отправке вакансии в группу: {e}")
             await message.answer("Не удалось отправить вакансию в группу.")
     else:
-        await message.answer("Нет подходящих вакансий для отправки.")
-
-@dp.message(Command("nolive"))
-async def disable_live(message: Message):
-    """Обработка команды /nolive"""
-    global is_live
-    is_live = False
-    logger.info("Автоматическая отправка вакансий отключена.")
-    await message.answer("Бот больше не будет отправлять вакансии в группу.")
-
-@dp.message(Command("mnelive"))
-async def send_best_vacancy_to_group(message: Message):
-    """Обработка команды /mnelive"""
-    logger.info("Команда /mnelive получена")
-    await message.answer("Ищу вакансию с максимальной зарплатой и отправляю её в группу...")
-
-    # Получаем лучшую вакансию
-    vacancy, vacancy_id = get_max_salary_vacancy()
-    if not vacancy:
-        await message.answer("Нет подходящих вакансий для отправки.")
-        return
-
-    # Проверяем, что эта вакансия не была отправлена ранее
-    global last_sent_vacancy_id
-    if vacancy_id == last_sent_vacancy_id:
-        await message.answer("Эта вакансия уже была отправлена ранее.")
-        return
-
-    try:
-        # Отправляем вакансию в группу
-        await bot.send_message(
-            chat_id=GROUP_ID,
-            message_thread_id=TOPIC_ID,
-            text=vacancy
-        )
-        logger.info(f"Вакансия отправлена в группу: {vacancy}")
-        last_sent_vacancy_id = vacancy_id
-        await message.answer("Вакансия успешно отправлена в группу!")
-    except Exception as e:
-        logger.error(f"Ошибка при отправке вакансии в группу: {e}")
-        await message.answer("Не удалось отправить вакансию в группу.")
+        await message.answer("Неверный номер вакансии.")
 
 async def main():
     """Запуск бота"""
     logger.info("Запуск бота...")
-    # Настройка планировщика
-    scheduler = AsyncIOScheduler(timezone=pytz.timezone('Europe/Moscow'))  # Указываем часовой пояс
-    scheduler.add_job(send_daily_vacancy, 'cron', hour=10, minute=0)
+    scheduler = AsyncIOScheduler(timezone=pytz.timezone('Europe/Moscow'))
     scheduler.start()
     await dp.start_polling(bot)
 
