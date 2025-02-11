@@ -1,0 +1,6 @@
+requests
+datetime
+aiogram
+logging
+apscheduler
+pytz
